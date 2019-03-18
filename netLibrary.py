@@ -3,7 +3,7 @@ from threading import Thread
 from hashlib import sha256
 import json
 import time
-import threading
+from threading import Thread, Lock
 
 
 class Server:
@@ -84,7 +84,7 @@ class Server:
             datagram, address = self._socket.recvfrom(4096)
 
             datagram_type = self._get_datagram_type(datagram)
-
+            print(f"Received datagram {datagram_type}")
             # Todo: crear log.txt con los paquetes recibidos
 
             if datagram_type == self.__DATAGRAM_RELIABLE:
@@ -121,22 +121,28 @@ class Client:
         self._packet_ID = 0
         self._datagrams_waiting_ack = {}
         self._completed = False
+        self._mutex = Lock()
 
     def send_data(self, data, datagram_type, is_json=False):
         # Thread sending
-        send_data_thread = threading.Thread(target=self._divide_and_send, args=(data, datagram_type, is_json))
-        send_data_thread.start()
+        self._bound_listener()
+
+        #send_data_thread = Thread(target=self._divide_and_send, args=(data, datagram_type, is_json))
+        #send_data_thread.start()
 
         # Thread listening acks
-        listen_ack_thread = threading.Thread(target=self._ack_listener)
+        listen_ack_thread = Thread(target=self._ack_listener)
         listen_ack_thread.start()
 
+        self._divide_and_send(data, datagram_type, is_json)
+
         # Thread resending subpackages
-        resend_packages_thread = threading.Thread(target=self._ack_resend_monitor)
-        resend_packages_thread.start()
+        #resend_packages_thread = Thread(target=self._ack_resend_monitor)
+        #resend_packages_thread.start()
 
     def _divide_and_send(self, data, datagram_type, is_json=False):
         data_to_split = data
+
         if is_json:
             data_to_split = json.dumps(data_to_split)
 
@@ -170,7 +176,7 @@ class Client:
         return result
 
     def _ack_listener(self):
-        self._bound_listener()
+        #self._bound_listener()
 
         while not self._completed:
             datagram, address = self._socket.recvfrom(4096)
@@ -180,6 +186,7 @@ class Client:
             subpackage_id = int.from_bytes(datagram[8:12], 'little')
 
             if datagram_type == self.DATAGRAM_ACK:
+                print(f'ACK received, type: {datagram_type}, Package id:{package_id}, subpackageid:{subpackage_id}')
                 self._mark_subpackage(package_id, subpackage_id)
                 self._clean_if_sended_correctly(package_id)
 
@@ -194,9 +201,11 @@ class Client:
         print(f'Listener closed on port {self.port}, host {self.address}')
 
     def _mark_subpackage(self, package_id, subpackage_id):
+        self._mutex.acquire()
         if self._datagrams_waiting_ack[package_id]['remaining_acks'] != 0:
-            self._datagrams_waiting_ack[package_id][subpackage_id] = True
+            self._datagrams_waiting_ack[package_id]['acks'][subpackage_id] = True
             self._datagrams_waiting_ack[package_id]['remaining_acks'] -= 1
+        self._mutex.release()
 
     def _clean_if_sended_correctly(self, package_id):
         if self._datagrams_waiting_ack[package_id]['remaining_acks'] != 0:
@@ -204,12 +213,20 @@ class Client:
 
     def _ack_resend_monitor(self):
         while not self._completed:
+            time.sleep(0.5)
             for key in self._datagrams_waiting_ack.keys():
-                if self._datagrams_waiting_ack[key]['remaining_acks'] != 0:
+                self._mutex.acquire()
+                remaining_acks = self._datagrams_waiting_ack[key]['remaining_acks']
+                self._mutex.release()
+
+                if remaining_acks != 0:
                     self._resend_data(key)
 
     def _resend_data(self, package_id):
+        self._mutex.acquire()
         remaining_acks = [i for i, x in enumerate(self._datagrams_waiting_ack[package_id]['acks']) if not x]
+        self._mutex.release()
+
         if not remaining_acks: #if list is empty
             self._completed = True
         else:
