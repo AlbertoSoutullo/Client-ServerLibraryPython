@@ -120,17 +120,20 @@ class Client:
         self._socket = socket(AF_INET, SOCK_DGRAM)
         self._packet_ID = 0
         self._datagrams_waiting_ack = {}
+        self._completed = False
 
     def send_data(self, data, datagram_type, is_json=False):
-        # Todo: Pensar como puedo acabar los threads cuando el envio de X archivo haya finalizado.
         # Thread sending
-        threading.Thread(target=self._divide_and_send, args=(data, datagram_type, is_json)).start()
+        send_data_thread = threading.Thread(target=self._divide_and_send, args=(data, datagram_type, is_json))
+        send_data_thread.start()
 
         # Thread listening acks
-        threading.Thread(target=self._ack_listener).start()
+        listen_ack_thread = threading.Thread(target=self._ack_listener)
+        listen_ack_thread.start()
 
         # Thread resending subpackages
-        threading.Timer(self.AWAIT_TIME, self._ack_resend_monitor).start()
+        resend_packages_thread = threading.Thread(target=self._ack_resend_monitor)
+        resend_packages_thread.start()
 
     def _divide_and_send(self, data, datagram_type, is_json=False):
         data_to_split = data
@@ -169,7 +172,7 @@ class Client:
     def _ack_listener(self):
         self._bound_listener()
 
-        while 1:
+        while not self._completed:
             datagram, address = self._socket.recvfrom(4096)
 
             datagram_type = int.from_bytes(datagram[:4], 'little')
@@ -180,9 +183,15 @@ class Client:
                 self._mark_subpackage(package_id, subpackage_id)
                 self._clean_if_sended_correctly(package_id)
 
+        self._unbound_listener()
+
     def _bound_listener(self):
         self._socket.bind((self.address, self.port))
         print(f'Listener bound on port {self.port}, host {self.address}')
+
+    def _unbound_listener(self):
+        self._socket.close()
+        print(f'Listener closed on port {self.port}, host {self.address}')
 
     def _mark_subpackage(self, package_id, subpackage_id):
         if self._datagrams_waiting_ack[package_id]['remaining_acks'] != 0:
@@ -194,21 +203,22 @@ class Client:
             del self._datagrams_waiting_ack[package_id]['backup_data']
 
     def _ack_resend_monitor(self):
-        for key in self._datagrams_waiting_ack.keys():
-            if self._datagrams_waiting_ack[key]['remaining_acks'] != 0:
-                self._resend_data(key)
+        while not self._completed:
+            for key in self._datagrams_waiting_ack.keys():
+                if self._datagrams_waiting_ack[key]['remaining_acks'] != 0:
+                    self._resend_data(key)
 
     def _resend_data(self, package_id):
         remaining_acks = [i for i, x in enumerate(self._datagrams_waiting_ack[package_id]['acks']) if not x]
-        for ack_location in remaining_acks:
-            self._socket.sendto(self._datagrams_waiting_ack[package_id]['backup_data'][ack_location],
-                                (self.address, self.port))
-            self._datagrams_waiting_ack['remaining_attempts'][ack_location] -= 1
-            if self._datagrams_waiting_ack['remaining_attempts'][ack_location] == 0:
-                self._datagrams_waiting_ack['acks'][ack_location] = True
-
-
-
+        if not remaining_acks: #if list is empty
+            self._completed = True
+        else:
+            for ack_location in remaining_acks:
+                self._socket.sendto(self._datagrams_waiting_ack[package_id]['backup_data'][ack_location],
+                                    (self.address, self.port))
+                self._datagrams_waiting_ack['remaining_attempts'][ack_location] -= 1
+                if self._datagrams_waiting_ack['remaining_attempts'][ack_location] == 0:
+                    self._datagrams_waiting_ack['acks'][ack_location] = True
 
 
 #2048 bytes sin cabezera(48)
