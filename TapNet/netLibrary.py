@@ -238,9 +238,9 @@ class Client:
                     print(f'Resending subpackage {ack_location}')
                     self._socket.sendto(_data_exists[ack_location],
                                         (self.address, self.address_port))
-                    self._datagrams_waiting_ack['remaining_attempts'][ack_location] -= 1
-                    if self._datagrams_waiting_ack['remaining_attempts'][ack_location] == 0:
-                        self._datagrams_waiting_ack['acks'][ack_location] = True
+                    self._datagrams_waiting_ack[package_id]['remaining_attempts'][ack_location] -= 1
+                    if self._datagrams_waiting_ack[package_id]['remaining_attempts'][ack_location] == 0:
+                        self._datagrams_waiting_ack[package_id]['acks'][ack_location] = True
 
 
 #2048 bytes sin cabezera(48)
