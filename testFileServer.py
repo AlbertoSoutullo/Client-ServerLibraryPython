@@ -1,4 +1,4 @@
-from netLibrary import Server
+from TapNet.netLibrary import Server
 
 
 def on_image_received(data):
@@ -11,4 +11,6 @@ if __name__ == "__main__":
 
     server.start()
 
+
+# Todo: Si solo se envian desde cliente, cierra la conexión y falla
 
