@@ -46,14 +46,13 @@ class Server:
             self._create_package_register(package_id, number_of_subpackages)
 
     def _save_package_payload(self, package_id, subpackage_id, payload, address, reliable):
-        if subpackage_id != 90:
-            if reliable:
-                self._send_ack(package_id, subpackage_id, address)
-                # We do this so we can avoid residual data with lates ACK
-                if self._packages[package_id]['remaining_subpackages'] != 0:
-                    print(f"Saving payload, packageid:{package_id}, subpackageid{subpackage_id}")
-                    self._packages[package_id]['data'][subpackage_id] = payload
-                    self._packages[package_id]['remaining_subpackages'] -= 1
+        if reliable:
+            self._send_ack(package_id, subpackage_id, address)
+            # We do this so we can avoid residual data with lates ACK
+            if self._packages[package_id]['remaining_subpackages'] != 0:
+                print(f"Saving payload, packageid:{package_id}, subpackageid{subpackage_id}")
+                self._packages[package_id]['data'][subpackage_id] = payload
+                self._packages[package_id]['remaining_subpackages'] -= 1
 
     def _parse_content(self, datagram):
         package_id = int.from_bytes(datagram[4:8], 'little')
