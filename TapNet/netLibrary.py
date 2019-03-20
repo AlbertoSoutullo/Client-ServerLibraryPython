@@ -18,6 +18,7 @@ class Server:
         self._socket = socket(AF_INET, SOCK_DGRAM)
         self._response_handler = handler
         self._packages = {}
+        # Todo: El servidor puede recibir de varios clientes? Si es asi, problema con IDS.
 
     def start(self):
         self._bound_server()
@@ -48,11 +49,11 @@ class Server:
     def _save_package_payload(self, package_id, subpackage_id, payload, address, reliable):
         if reliable:
             self._send_ack(package_id, subpackage_id, address)
-            # We do this so we can avoid residual data with lates ACK
-            if self._packages[package_id]['remaining_subpackages'] != 0:
-                print(f"Saving payload, packageid:{package_id}, subpackageid{subpackage_id}")
-                self._packages[package_id]['data'][subpackage_id] = payload
-                self._packages[package_id]['remaining_subpackages'] -= 1
+        # We do this so we can avoid residual data with lates ACK
+        if self._packages[package_id]['remaining_subpackages'] != 0:
+            print(f"Saving payload, packageid:{package_id}, subpackageid{subpackage_id}")
+            self._packages[package_id]['data'][subpackage_id] = payload
+            self._packages[package_id]['remaining_subpackages'] -= 1
 
     def _parse_content(self, datagram):
         package_id = int.from_bytes(datagram[4:8], 'little')
@@ -130,14 +131,16 @@ class Client:
         self._bound_listener()
 
         # Thread listening acks
-        listen_ack_thread = Thread(target=self._ack_listener)
-        listen_ack_thread.start()
+        if datagram_type == self._DATAGRAM_RELIABLE:
+            listen_ack_thread = Thread(target=self._ack_listener)
+            listen_ack_thread.start()
 
         self._divide_and_send(data, datagram_type, is_json)
 
         # Thread resending subpackages
-        resend_packages_thread = Thread(target=self._ack_resend_monitor)
-        resend_packages_thread.start()
+        if datagram_type == self._DATAGRAM_RELIABLE:
+            resend_packages_thread = Thread(target=self._ack_resend_monitor)
+            resend_packages_thread.start()
 
     def _divide_and_send(self, data, datagram_type, is_json=False):
         data_to_split = data
@@ -154,7 +157,7 @@ class Client:
             chunk = datagram_type.to_bytes(4, 'little') + self._packet_ID.to_bytes(4, 'little') + hash \
                     + len(data_splitted).to_bytes(4, 'little') + i.to_bytes(4, 'little') + chunk
             self._socket.sendto(chunk, (self.address, self.address_port))
-            self._datagrams_waiting_ack[self._packet_ID]['backup_data'][i] = chunk # Todo: revisar esta linea
+            self._datagrams_waiting_ack[self._packet_ID]['backup_data'][i] = chunk
 
         self._packet_ID += 1
 
@@ -176,6 +179,7 @@ class Client:
 
     def _ack_listener(self):
         while not self._completed:
+            # Todo: Si se cierra al estar completo en el ultimo metodo, esto peta
             datagram, address = self._socket.recvfrom(4096)
 
             datagram_type = int.from_bytes(datagram[:4], 'little')
@@ -211,6 +215,8 @@ class Client:
     def _clean_if_sended_correctly(self, package_id, subpackage_id):
         if self._datagrams_waiting_ack[package_id]['remaining_acks'] != 0:
             self._datagrams_waiting_ack[package_id]['backup_data'][subpackage_id] = None
+        #else:
+        #    self._socket.close()
 
     def _ack_resend_monitor(self):
         while not self._completed:

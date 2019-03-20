@@ -6,4 +6,5 @@ if __name__ == '__main__':
     with open("test-image.jpg", mode='rb') as file:
         fileContent = file.read()
 
-        client.send_data(fileContent, 1)
+        client.send_data(fileContent, 2)
+        client.send_data(fileContent, 2)
