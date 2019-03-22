@@ -18,6 +18,7 @@ class Server:
         self._socket = socket(AF_INET, SOCK_DGRAM)
         self._response_handler = handler
         self._packages = {}
+        self._package_identifier = 0
         # Todo: El servidor puede recibir de varios clientes? Si es asi, problema con IDS.
 
     def start(self):
@@ -37,23 +38,23 @@ class Server:
               subpackage_id.to_bytes(4, 'little')
         self._socket.sendto(ack, address)
 
-    def _create_package_register(self, package_id, number_of_subpackages):
-        self._packages[package_id] = {}
-        self._packages[package_id]['data'] = [False for _ in range(number_of_subpackages)]
-        self._packages[package_id]['remaining_subpackages'] = number_of_subpackages
+    def _create_package_register(self, unique_identifier, number_of_subpackages):
+        self._packages[unique_identifier] = {}
+        self._packages[unique_identifier]['data'] = [False for _ in range(number_of_subpackages)]
+        self._packages[unique_identifier]['remaining_subpackages'] = number_of_subpackages
 
-    def _check_if_package_already_registered(self, package_id, number_of_subpackages):
-        if package_id not in self._packages.keys():
-            self._create_package_register(package_id, number_of_subpackages)
+    def _check_if_package_already_registered(self, unique_identifier, number_of_subpackages):
+        if unique_identifier not in self._packages.keys():
+            self._create_package_register(unique_identifier, number_of_subpackages)
 
-    def _save_package_payload(self, package_id, subpackage_id, payload, address, reliable):
+    def _save_package_payload(self, unique_identifier, package_id, subpackage_id, payload, address, reliable):
         if reliable:
             self._send_ack(package_id, subpackage_id, address)
         # We do this so we can avoid residual data with lates ACK
-        if self._packages[package_id]['remaining_subpackages'] != 0:
-            print(f"Saving payload, packageid:{package_id}, subpackageid{subpackage_id}")
-            self._packages[package_id]['data'][subpackage_id] = payload
-            self._packages[package_id]['remaining_subpackages'] -= 1
+        if self._packages[unique_identifier]['remaining_subpackages'] != 0:
+            print(f"Saving payload from {unique_identifier}, packageid:{package_id}, subpackageid{subpackage_id}")
+            self._packages[unique_identifier]['data'][subpackage_id] = payload
+            self._packages[unique_identifier]['remaining_subpackages'] -= 1
 
     def _parse_content(self, datagram):
         package_id = int.from_bytes(datagram[4:8], 'little')
@@ -63,20 +64,26 @@ class Server:
 
         return package_id, number_of_subpackages, subpackage_id, payload
 
-    def _if_package_completed_handle_and_clean(self, package_id):
-        if self._packages[package_id]['remaining_subpackages'] == 0:
-            print(f"Package id {package_id} completed!")
-            self._response_handler(b''.join((subdata for subdata in self._packages[package_id]['data'])))
-            del self._packages[package_id]['data'][:]
+    def _if_package_completed_handle_and_clean(self, unique_identifier):
+        if self._packages[unique_identifier]['remaining_subpackages'] == 0:
+            print(f"Package id {unique_identifier} completed!")
+            self._response_handler(b''.join((subdata for subdata in self._packages[unique_identifier]['data'])))
+            del self._packages[unique_identifier]['data'][:]
 
     def _parse_datagram(self, datagram, address, reliable=False):
         # Datagram Header: datagram_type, packet_id, hash, number_of_subpackages, subpackage_id
         if self._hash_is_correct(datagram):
             package_id, number_of_subpackages, subpackage_id, payload = self._parse_content(datagram)
-            print(f"Received datagram, packageid:{package_id}, subpackageid{subpackage_id}")
-            self._check_if_package_already_registered(package_id, number_of_subpackages)
-            self._save_package_payload(package_id, subpackage_id, payload, address, reliable)
-            self._if_package_completed_handle_and_clean(package_id)
+            print(f"Received datagram from {address}, packageid:{package_id}, subpackageid{subpackage_id}")
+            unique_identifier = self._create_unique_identifier(address, package_id)
+            self._check_if_package_already_registered(unique_identifier, number_of_subpackages)
+            self._save_package_payload(unique_identifier, package_id, subpackage_id, payload, address, reliable)
+            self._if_package_completed_handle_and_clean(unique_identifier)
+
+    def _create_unique_identifier(self, address, package_id):
+        unique_identifier = (address[0], address[1], self._package_identifier, package_id)
+        self._package_identifier += 1
+        return unique_identifier
 
     def _get_datagram_type(self, datagram):
         return int.from_bytes(datagram[:4], 'little')
@@ -105,6 +112,8 @@ class Server:
         else:
             return True
 
+# Todo: Mirar como hacer que cuando un send acabe, se cierren esos threads.
+
 
 class Client:
     _DATAGRAM_ACK = 0
@@ -128,6 +137,8 @@ class Client:
 
     def send_data(self, data, datagram_type, is_json=False):
         # Thread sending
+        #if self._completed is False:
+        #    self._bound_listener()
         self._bound_listener()
 
         # Thread listening acks
@@ -235,7 +246,7 @@ class Client:
         self._mutex.release()
 
         if not remaining_acks: #if list is empty
-            self._completed = True
+            pass
         else:
             for ack_location in remaining_acks:
                 _data_exists = self._datagrams_waiting_ack[package_id].get('backup_data', None)
