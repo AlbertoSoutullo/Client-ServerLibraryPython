@@ -19,7 +19,7 @@ class Server:
         self._response_handler = handler
         self._packages = {}
         self._package_identifier = 0
-        # Todo: El servidor puede recibir de varios clientes? Si es asi, problema con IDS.
+        # Todo: 4 ids
 
     def start(self):
         self._bound_server()
@@ -132,26 +132,30 @@ class Client:
         self._socket = socket(AF_INET, SOCK_DGRAM)
         self._packet_ID = 0
         self._datagrams_waiting_ack = {}
-        self._completed = False
+        self._is_completed = False
         self._mutex = Lock()
 
     def send_data(self, data, datagram_type, is_json=False):
         # Thread sending
-        #if self._completed is False:
-        #    self._bound_listener()
-        self._bound_listener()
+        # If we close the socket, we need to create it again
+        if self._is_completed:
+            self._socket = socket(AF_INET, SOCK_DGRAM)
+        self._is_completed = False
 
-        # Thread listening acks
-        if datagram_type == self._DATAGRAM_RELIABLE:
-            listen_ack_thread = Thread(target=self._ack_listener)
-            listen_ack_thread.start()
+        if self._bound_listener():
 
-        self._divide_and_send(data, datagram_type, is_json)
+            # Thread listening acks
+            if datagram_type == self._DATAGRAM_RELIABLE:
+                listen_ack_thread = Thread(target=self._ack_listener)
+                listen_ack_thread.start()
 
-        # Thread resending subpackages
-        if datagram_type == self._DATAGRAM_RELIABLE:
-            resend_packages_thread = Thread(target=self._ack_resend_monitor)
-            resend_packages_thread.start()
+            self._divide_and_send(data, datagram_type, is_json)
+
+            # Thread resending subpackages
+            if datagram_type == self._DATAGRAM_RELIABLE:
+                self._ack_resend_monitor()
+            else:
+                self._is_completed = True
 
     def _divide_and_send(self, data, datagram_type, is_json=False):
         data_to_split = data
@@ -189,10 +193,12 @@ class Client:
         return result
 
     def _ack_listener(self):
-        while not self._completed:
+        while not self._is_completed:
             # Todo: Si se cierra al estar completo en el ultimo metodo, esto peta
-            datagram, address = self._socket.recvfrom(4096)
-
+            try:
+                datagram, address = self._socket.recvfrom(4096)
+            except OSError as e:
+                pass
             datagram_type = int.from_bytes(datagram[:4], 'little')
             package_id = int.from_bytes(datagram[4:8], 'little')
             subpackage_id = int.from_bytes(datagram[8:12], 'little')
@@ -200,7 +206,6 @@ class Client:
             if datagram_type == self._DATAGRAM_ACK:
                 print(f'ACK received, type: {datagram_type}, Package id:{package_id}, subpackageid:{subpackage_id}')
                 self._mark_subpackage(package_id, subpackage_id)
-                self._clean_if_sended_correctly(package_id, subpackage_id)
 
         # Todo: Export data to txt
         self._clean_register()
@@ -209,8 +214,14 @@ class Client:
         self._datagrams_waiting_ack.clear()
 
     def _bound_listener(self):
-        self._socket.bind(('localhost', self._local_port))
-        print(f'Listener bound on port {self._local_port}, host {self.address}')
+        try:
+            self._socket.bind(('localhost', self._local_port))
+            print(f'Listener bound on port {self._local_port}, host {self.address}')
+            return True
+        except OSError as e:
+            print(f"Error binding port {self._local_port}, host {self.address}")
+            print(e)
+            return False
 
     def _unbound_listener(self):
         self._socket.close()
@@ -221,16 +232,13 @@ class Client:
         if self._datagrams_waiting_ack[package_id]['remaining_acks'] != 0:
             self._datagrams_waiting_ack[package_id]['acks'][subpackage_id] = True
             self._datagrams_waiting_ack[package_id]['remaining_acks'] -= 1
+            self._datagrams_waiting_ack[package_id]['backup_data'][subpackage_id] = None
+        else:
+            self._is_completed = True
         self._mutex.release()
 
-    def _clean_if_sended_correctly(self, package_id, subpackage_id):
-        if self._datagrams_waiting_ack[package_id]['remaining_acks'] != 0:
-            self._datagrams_waiting_ack[package_id]['backup_data'][subpackage_id] = None
-        #else:
-        #    self._socket.close()
-
     def _ack_resend_monitor(self):
-        while not self._completed:
+        while not self._is_completed:
             time.sleep(0.5)
             for key in self._datagrams_waiting_ack.keys():
                 self._mutex.acquire()
@@ -239,6 +247,10 @@ class Client:
 
                 if remaining_acks != 0:
                     self._resend_data(key)
+                else:
+                    self._is_completed = True
+        print("Closing monitor.")
+        self._unbound_listener()
 
     def _resend_data(self, package_id):
         self._mutex.acquire()
@@ -258,6 +270,8 @@ class Client:
                     if self._datagrams_waiting_ack[package_id]['remaining_attempts'][ack_location] == 0:
                         self._datagrams_waiting_ack[package_id]['acks'][ack_location] = True
 
+
+# Todo: Mirar otra manera de cerrar el socket.
 
 #2048 bytes sin cabezera(48)
 '''
