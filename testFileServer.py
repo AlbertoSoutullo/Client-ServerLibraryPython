@@ -14,3 +14,4 @@ if __name__ == "__main__":
 
 # Todo: Si solo se envian desde cliente, cierra la conexión y falla
 
+#Send json lo transforma a bytes, y se llama a send bytes.
