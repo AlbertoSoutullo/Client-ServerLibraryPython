@@ -9,12 +9,14 @@ if __name__ == '__main__':
 
         client.send_data(fileContent, 2)
         client.send_data(fileContent, 2)
-        client.send_data(fileContent, 1)
-        client.send_data(fileContent, 2)
-        client.send_data(fileContent, 1)
+        #client.send_data(fileContent, 1)
+        #client.send_data(fileContent, 2)
+        #client.send_data(fileContent, 1)
+#
+        #client2.send_data(fileContent, 2)
+        #client.send_data(fileContent, 2)
+        #client.send_data(fileContent, 2)
+        #client2.send_data(fileContent, 1)
+        #client2.send_data(fileContent, 2)
 
-        client2.send_data(fileContent, 2)
-        client.send_data(fileContent, 2)
-        client.send_data(fileContent, 2)
-        client2.send_data(fileContent, 1)
-        client2.send_data(fileContent, 2)
+    # Todo: Cambiar que cuando se quedan esperando los acks, siga enviando más paquetes
