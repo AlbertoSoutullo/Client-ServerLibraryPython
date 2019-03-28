@@ -128,20 +128,48 @@ class Client:
         self.address_port = address_port
         self._local_port = local_port
         self._socket = socket(AF_INET, SOCK_DGRAM)
-        self._packet_ID = 0
-        self._datagrams_waiting_ack = {}
-        self._is_completed = False
+        self._package_ID = 0
+        self._reliable_datagrams_info = {}
+        self._is_closed = False
         self._mutex = Lock()
 
-    def send_data(self, data, datagram_type, is_json=False):
-        # If we close the socket, we need to create it again
-        if self._is_completed:
-            self._socket = socket(AF_INET, SOCK_DGRAM)
-        self._is_completed = False
+    def send_json(self, data, datagram_type, destination):
+        json_bytes = json.dumps(data).encode(encoding='utf-8')
+        self.send_data(json_bytes, datagram_type, destination)
 
+    def send_data(self, data, datagram_type, destination):
+        unique_package_id = self._package_ID #Gurdamos el id por seguridad, ya que igual otros threads mas adelante lo modifican.
+
+        is_reliable = datagram_type == self._DATAGRAM_RELIABLE
         self._bound_socket()
 
+        #Dividir los datos.
+        data_splitted = self._split(data)
+
+        #Realizar la estructura de datos
+        if is_reliable:
+            self._initialize_structure_for_reliable(len(data_splitted), unique_package_id)
+            # Thread: Preparar el ack listener
+            listen_ack_thread = Thread(target=self._ack_listener, args=[unique_package_id])
+            listen_ack_thread.start()
+
+        #Thread: Enviar datos
+
+        self._send(data_splitted, datagram_type, destination, unique_package_id, is_reliable)
+
+        #Activar monitor
+
+        if is_reliable:
+            resend_monitor = Thread(target=self._ack_resend_monitor, args=[unique_package_id])
+            resend_monitor.start()
+
+
+
+
+
+
         if datagram_type == self._DATAGRAM_RELIABLE:
+
             listen_ack_thread = Thread(target=self._ack_listener)
             listen_ack_thread.start()
 
@@ -151,39 +179,31 @@ class Client:
             resend_monitor = Thread(target=self._ack_resend_monitor)
             resend_monitor.start()
         else:
-            self._is_completed = True
+            self._is_closed = True
 
         #self._unbound_socket()
 
-    def _divide_and_send(self, data, datagram_type, is_json=False):
-        is_reliable = datagram_type == self._DATAGRAM_RELIABLE
-        data_to_split = data
-
-        if is_json:
-            data_to_split = json.dumps(data_to_split).encode(encoding='utf-8')
-
-        data_splitted = self._split(data_to_split)
-
-        if is_reliable:
-            self._initialize_structure_for_reliable(len(data_splitted))
-
+    def _send(self, data_splitted, datagram_type, destination, unique_package_id, is_reliable):
         for i, chunk in enumerate(data_splitted):
             hash = sha256(chunk).digest()
-            chunk = datagram_type.to_bytes(4, 'little') + self._packet_ID.to_bytes(4, 'little') + hash \
+            chunk = datagram_type.to_bytes(4, 'little') + unique_package_id.to_bytes(4, 'little') + hash \
                     + len(data_splitted).to_bytes(4, 'little') + i.to_bytes(4, 'little') + chunk
-            self._socket.sendto(chunk, (self.address, self.address_port))
+            self._socket.sendto(chunk, destination)
             if is_reliable:
-                self._datagrams_waiting_ack[self._packet_ID]['backup_data'][i] = chunk
+                self._reliable_datagrams_info[unique_package_id]['backup_data'][i] = chunk
 
-        self._packet_ID += 1
+        self._mutex.acquire()
+        self._package_ID += 1
+        self._mutex.release()
 
-    def _initialize_structure_for_reliable(self, data_length):
-        if self._packet_ID not in self._datagrams_waiting_ack.keys():
-            self._datagrams_waiting_ack[self._packet_ID] = {}
-            self._datagrams_waiting_ack[self._packet_ID]['acks'] = [False for _ in range(data_length)]
-            self._datagrams_waiting_ack[self._packet_ID]['remaining_acks'] = data_length
-            self._datagrams_waiting_ack[self._packet_ID]['backup_data'] = [None for _ in range(data_length)]
-            self._datagrams_waiting_ack[self._packet_ID]['remaining_attempts'] = [self._SEND_ATTEMPTS for _ in range(data_length)]
+    def _initialize_structure_for_reliable(self, data_length, unique_package_id):
+        if unique_package_id not in self._reliable_datagrams_info.keys():
+            self._reliable_datagrams_info[unique_package_id] = {}
+            self._reliable_datagrams_info[unique_package_id]['acks'] = [False for _ in range(data_length)]
+            self._reliable_datagrams_info[unique_package_id]['remaining_acks'] = data_length
+            self._reliable_datagrams_info[unique_package_id]['backup_data'] = [None for _ in range(data_length)]
+            self._reliable_datagrams_info[unique_package_id]['remaining_attempts'] = [self._SEND_ATTEMPTS for _ in range(data_length)]
+            self._reliable_datagrams_info[unique_package_id]['last_send_time'] = [None for _ in range(data_length)]
 
     def _split(self, data):
         result = []
@@ -193,8 +213,14 @@ class Client:
         result.append(data)
         return result
 
-    def _ack_listener(self):
-        while not self._is_completed:
+
+    def _get_number_remaining_acks(self, package_id):
+        return self._reliable_datagrams_info[package_id]['remaining_acks']
+
+    #Se creará un ack listener por cada paquete. De esta manera si se están recibiendo 5 paquetes a la vez, se
+    #tendrán 5 ack listeners pada aliviar trabajo. Cada uno estará corriendo mientras no se acabae un paquete en concreto.
+    def _ack_listener(self, unique_package_id):
+        while self._get_number_remaining_acks(unique_package_id) > 0:
             try:
                 datagram, address = self._socket.recvfrom(4096)
             except OSError as e:
@@ -209,10 +235,10 @@ class Client:
                 self._mark_subpackage(package_id, subpackage_id)
 
         # Todo: Export data to txt
-        self._clean_register()
+        self._clean_package_register(unique_package_id)
 
-    def _clean_register(self):
-        self._datagrams_waiting_ack.clear()
+    def _clean_package_register(self, package_id_listener):
+        self._reliable_datagrams_info[package_id_listener].clear()
 
     def _bound_socket(self):
         try:
@@ -228,46 +254,44 @@ class Client:
 
     def _mark_subpackage(self, package_id, subpackage_id):
         self._mutex.acquire()
-        if self._datagrams_waiting_ack[package_id]['remaining_acks'] != 0:
-            self._datagrams_waiting_ack[package_id]['acks'][subpackage_id] = True
-            self._datagrams_waiting_ack[package_id]['remaining_acks'] -= 1
-            self._datagrams_waiting_ack[package_id]['backup_data'][subpackage_id] = None
-            if self._datagrams_waiting_ack[package_id]['remaining_acks'] == 0:
-                self._is_completed = True
+        if self._reliable_datagrams_info[package_id]['remaining_acks'] > 0:
+            self._reliable_datagrams_info[package_id]['acks'][subpackage_id] = True
+            self._reliable_datagrams_info[package_id]['remaining_acks'] -= 1
+            self._reliable_datagrams_info[package_id]['backup_data'][subpackage_id] = None
         self._mutex.release()
 
-    def _ack_resend_monitor(self):
-        while not self._is_completed:
+    def _ack_resend_monitor(self, unique_package_id):
+        while self._get_number_remaining_acks(unique_package_id) > 0:
             time.sleep(0.5)
-            for key in self._datagrams_waiting_ack.keys():
+            for key in self._reliable_datagrams_info.keys():
                 self._mutex.acquire()
-                remaining_acks = self._datagrams_waiting_ack[key]['remaining_acks']
+                remaining_acks = self._reliable_datagrams_info[key]['remaining_acks']
                 self._mutex.release()
 
                 if remaining_acks != 0:
                     self._resend_data(key)
                 else:
-                    self._is_completed = True
+                    self._is_closed = True
         print("Closing monitor.")
 
     #Todo: limpiar
     def _resend_data(self, package_id):
         self._mutex.acquire()
-        remaining_acks = [i for i, x in enumerate(self._datagrams_waiting_ack[package_id]['acks']) if not x]
+        remaining_acks = [i for i, x in enumerate(self._reliable_datagrams_info[package_id]['acks']) if not x]
         self._mutex.release()
 
         if not remaining_acks: #if list is empty
             pass
         else:
             for ack_location in remaining_acks:
-                _data_exists = self._datagrams_waiting_ack[package_id].get('backup_data', None)
+                _data_exists = self._reliable_datagrams_info[package_id].get('backup_data', None)
                 if _data_exists is not None:
                     print(f'Resending subpackage {ack_location} of package {package_id}')
                     self._socket.sendto(_data_exists[ack_location],
                                         (self.address, self.address_port))
-                    self._datagrams_waiting_ack[package_id]['remaining_attempts'][ack_location] -= 1
-                    if self._datagrams_waiting_ack[package_id]['remaining_attempts'][ack_location] == 0:
-                        self._datagrams_waiting_ack[package_id]['acks'][ack_location] = True
+                    self._reliable_datagrams_info[package_id]['remaining_attempts'][ack_location] -= 1
+                    if self._reliable_datagrams_info[package_id]['remaining_attempts'][ack_location] == 0:
+                        self._reliable_datagrams_info[package_id]['acks'][ack_location] = True
 
 
 
