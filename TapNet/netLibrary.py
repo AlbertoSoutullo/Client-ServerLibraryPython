@@ -74,14 +74,16 @@ class Server:
         # Datagram Header: datagram_type, packet_id, hash, number_of_subpackages, subpackage_id
         if self._hash_is_correct(datagram):
             package_id, number_of_subpackages, subpackage_id, payload = self._parse_content(datagram)
-            print(f"Received datagram from {address}, packageid:{package_id}, subpackageid{subpackage_id}")
-            unique_identifier = self._create_unique_identifier(address, package_id)
-            self._check_if_package_already_registered(unique_identifier, number_of_subpackages)
-            self._save_package_payload(unique_identifier, package_id, subpackage_id, payload, address, reliable)
-            self._if_package_completed_handle_and_clean(unique_identifier)
+            if subpackage_id != 80:
+                print(f"Received datagram from {address}, packageid:{package_id}, subpackageid{subpackage_id}")
+                unique_identifier = self._create_unique_identifier(address, package_id)
+                self._check_if_package_already_registered(unique_identifier, number_of_subpackages)
+                self._save_package_payload(unique_identifier, package_id, subpackage_id, payload, address, reliable)
+                self._if_package_completed_handle_and_clean(unique_identifier)
 
     def _create_unique_identifier(self, address, package_id):
-        unique_identifier = (address[0], address[1], self._package_identifier, package_id)
+        #unique_identifier = (address[0], address[1], self._package_identifier, package_id)
+        unique_identifier = (address[0], address[1], package_id)
         self._package_identifier += 1
         return unique_identifier
 
@@ -120,7 +122,7 @@ class Client:
 
     _CHUNK_SIZE = 2048
 
-    _AWAIT_TIME = 0.5
+    _AWAIT_TIME = 1
     _SEND_ATTEMPTS = 3
 
     def __init__(self, address=None, address_port=None, local_port=None):
@@ -160,26 +162,8 @@ class Client:
         #Activar monitor
 
         if is_reliable:
-            resend_monitor = Thread(target=self._ack_resend_monitor, args=[unique_package_id])
+            resend_monitor = Thread(target=self._ack_resend_monitor, args=[unique_package_id, destination])
             resend_monitor.start()
-
-
-
-
-
-
-        if datagram_type == self._DATAGRAM_RELIABLE:
-
-            listen_ack_thread = Thread(target=self._ack_listener)
-            listen_ack_thread.start()
-
-        self._divide_and_send(data, datagram_type, is_json)
-
-        if datagram_type == self._DATAGRAM_RELIABLE:
-            resend_monitor = Thread(target=self._ack_resend_monitor)
-            resend_monitor.start()
-        else:
-            self._is_closed = True
 
         #self._unbound_socket()
 
@@ -191,6 +175,7 @@ class Client:
             self._socket.sendto(chunk, destination)
             if is_reliable:
                 self._reliable_datagrams_info[unique_package_id]['backup_data'][i] = chunk
+                self._reliable_datagrams_info[unique_package_id]['last_send_time'][i] = time.time()
 
         self._mutex.acquire()
         self._package_ID += 1
@@ -215,7 +200,8 @@ class Client:
 
 
     def _get_number_remaining_acks(self, package_id):
-        return self._reliable_datagrams_info[package_id]['remaining_acks']
+        remaining_acks = self._reliable_datagrams_info[package_id].get('remaining_acks', 0)
+        return remaining_acks
 
     #Se creará un ack listener por cada paquete. De esta manera si se están recibiendo 5 paquetes a la vez, se
     #tendrán 5 ack listeners pada aliviar trabajo. Cada uno estará corriendo mientras no se acabae un paquete en concreto.
@@ -260,22 +246,15 @@ class Client:
             self._reliable_datagrams_info[package_id]['backup_data'][subpackage_id] = None
         self._mutex.release()
 
-    def _ack_resend_monitor(self, unique_package_id):
+    def _ack_resend_monitor(self, unique_package_id, destination):
         while self._get_number_remaining_acks(unique_package_id) > 0:
             time.sleep(0.5)
-            for key in self._reliable_datagrams_info.keys():
-                self._mutex.acquire()
-                remaining_acks = self._reliable_datagrams_info[key]['remaining_acks']
-                self._mutex.release()
+            self._resend_data(unique_package_id, destination)
 
-                if remaining_acks != 0:
-                    self._resend_data(key)
-                else:
-                    self._is_closed = True
         print("Closing monitor.")
 
     #Todo: limpiar
-    def _resend_data(self, package_id):
+    def _resend_data(self, package_id, destination):
         self._mutex.acquire()
         remaining_acks = [i for i, x in enumerate(self._reliable_datagrams_info[package_id]['acks']) if not x]
         self._mutex.release()
@@ -285,13 +264,17 @@ class Client:
         else:
             for ack_location in remaining_acks:
                 _data_exists = self._reliable_datagrams_info[package_id].get('backup_data', None)
+                _elapsed_time_list = self._reliable_datagrams_info[package_id].get('last_send_time', None)
+                _elapsed_time = _elapsed_time_list[ack_location]
                 if _data_exists is not None:
-                    print(f'Resending subpackage {ack_location} of package {package_id}')
-                    self._socket.sendto(_data_exists[ack_location],
-                                        (self.address, self.address_port))
-                    self._reliable_datagrams_info[package_id]['remaining_attempts'][ack_location] -= 1
-                    if self._reliable_datagrams_info[package_id]['remaining_attempts'][ack_location] == 0:
-                        self._reliable_datagrams_info[package_id]['acks'][ack_location] = True
+                    if _elapsed_time is not None:
+                        if time.time() - _elapsed_time > self._AWAIT_TIME:
+                            print(f'Resending subpackage {ack_location} of package {package_id}')
+                            self._socket.sendto(_data_exists[ack_location], destination)
+                            self._reliable_datagrams_info[package_id]['remaining_attempts'][ack_location] -= 1
+                            self._reliable_datagrams_info[package_id]['last_send_time'][ack_location] = time.time()
+                            if self._reliable_datagrams_info[package_id]['remaining_attempts'][ack_location] == 0:
+                                self._reliable_datagrams_info[package_id]['acks'][ack_location] = True
 
 
 
