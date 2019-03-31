@@ -1,13 +1,15 @@
-from TapNet.netLibrary import Client
+from TapNet.tapnet import TapNet
 
 if __name__ == '__main__':
-    client = Client(address='localhost', address_port=10000, local_port=11000)
+    client = TapNet()
 
-    with open("test-image.jpg", mode='rb') as file:
+    with open("Test1.jpg", mode='rb') as file:
         fileContent = file.read()
 
-        client.send_data(fileContent, 2, ('localhost', 10000))
-        client.send_data(fileContent, 1, ('localhost', 10000))
-        client.send_data(fileContent, 2, ('localhost', 10000))
+    with open("Test2.jpg", mode='rb') as file:
+        fileContent2 = file.read()
 
-    # Todo: Cambiar que cuando se quedan esperando los acks, siga enviando más paquetes
+    client.send_data(fileContent2, 2, ('localhost', 10000))
+    client.send_data(fileContent, 1, ('localhost', 10000))
+    client.send_data(fileContent2, 2, ('localhost', 10000))
+
