@@ -23,7 +23,7 @@ class TapNet:
         self._datagrams_awating_ack = {}  # Reliable Datagrams waiting ACK
         self._cache = {}  # Data from packages received
         self._socket = socket(AF_INET, SOCK_DGRAM)
-        self._is_binded = False
+        self._is_bound = False
         self._mutex = Lock()
 
     def start(self):
@@ -32,7 +32,7 @@ class TapNet:
         """
         print('Starting server on  {}'.format(self.address))
         self._socket.bind(self.address)
-        self._is_binded = True
+        self._is_bound = True
 
         listen_loop = Thread(target=self._listen_loop)
         listen_loop.start()
@@ -60,7 +60,6 @@ class TapNet:
         data_splitted = self._split(bytes_to_send)  # Split binary data
 
         if is_reliable:
-            # Realizar la estructura de datos
             self._initialize_structure_for_datagram(len(data_splitted), unique_package_id)
             # Thread: ACK Listener
             listen_ack_thread = Thread(target=self._ack_listener, args=[unique_package_id])
@@ -78,7 +77,7 @@ class TapNet:
 
     def _lock_package_id(self):
         """
-        Locks a unique id, so race condicions are avoided if sended multiples packages.
+        Locks a unique id, so race conditions are avoided if sent multiples packages.
         :return: unique package id.
         """
         self._mutex.acquire()
@@ -133,6 +132,12 @@ class TapNet:
         return completed_or_expired
 
     def _mark_subpackage(self, package_id, subpackage_id):
+        """
+        Mark a specific subpackage as true. Erases backup data, and reduce the number of remaining acks.
+        If there are no more subpackages to receive, that package is completed.
+        :param package_id: Unique package id
+        :param subpackage_id: Unique subpackage id
+        """
         self._mutex.acquire()
         if self._datagrams_awating_ack[package_id]['remaining_acks'] > 0:
             self._datagrams_awating_ack[package_id]['acks'][subpackage_id] = True
@@ -143,12 +148,21 @@ class TapNet:
         self._mutex.release()
 
     def _clean_package_register(self, package_id_listener):
+        """
+        Clear all data of a given package waiting acks.
+        :param package_id_listener:
+        """
         self._datagrams_awating_ack[package_id_listener].clear()
 
     def _ack_listener(self, unique_package_id):
-        if not self._is_binded:
+        """
+        Works in a Thread. It runs per package sent. If we send 4 packages at the same time, 4 ack listeners will spawn.
+        Each one is "linked" to it's package spawner. If that package is completed, that listener closes.
+        :param unique_package_id: Unique package identifier
+        """
+        if not self._is_bound:
             self._socket.bind(('localhost', 10001))
-            self._is_binded = True
+            self._is_bound = True
 
         while not self._get_is_completed_or_expired(unique_package_id):
 
@@ -159,10 +173,10 @@ class TapNet:
             subpackage_id = int.from_bytes(datagram[8:12], 'little')
 
             if datagram_type == self.DATAGRAM_ACK:
-                print(f'ACK received, type: {datagram_type}, Package id:{package_id}, subpackageid:{subpackage_id}')
+                print(f'ACK received, type: {datagram_type}, Package id:{package_id}, Subpackage Id:{subpackage_id}')
                 self._mark_subpackage(package_id, subpackage_id)
 
-        print("Closing listener")
+        #print("Closing listener")
         self._clean_package_register(unique_package_id)
 
     def _send(self, data_splitted, datagram_type, destination, unique_package_id, is_reliable):
@@ -213,7 +227,7 @@ class TapNet:
     def _send_ack(self, package_id, subpackage_id, address):
         ack = self.DATAGRAM_ACK.to_bytes(4, 'little') + package_id.to_bytes(4, 'little') + \
               subpackage_id.to_bytes(4, 'little')
-        print(f"ACK sended to {package_id}, {subpackage_id}")
+        print(f"ACK sent to {package_id}, {subpackage_id}")
         self._socket.sendto(ack, address)
 
     def _save_package_payload(self, unique_identifier, package_id, subpackage_id, payload, address, reliable):
