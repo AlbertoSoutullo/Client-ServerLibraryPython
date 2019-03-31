@@ -11,22 +11,25 @@ class TapNet:
     DATAGRAM_NORMAL = 1
     DATAGRAM_RELIABLE = 2
 
-    _CHUNK_SIZE = 2048  # Tamaño de los chunks, en bytes
+    _CHUNK_SIZE = 2048
 
     _SEND_ATTEMPTS = 3
     _AWAIT_TIME = 0.5
 
     def __init__(self, address=None):
-        self.address = address  # Server Address ('localhost', 10000)
-        self._package_ID = 0  # Id del próximo datagrama a enviar
-        self._datagrams_awating_ack = {}  # Paquetes 'confiables' enviados a la espera de confirmación
-        self._cache = {}  # Cache donde guardamos los datos recibidos
+        self.address = address  # Server Address
+        self.response_handler = None
+        self._package_ID = 0  # ID from the next datagram to send
+        self._datagrams_awating_ack = {}  # Reliable Datagrams waiting ACK
+        self._cache = {}  # Data from packages received
         self._socket = socket(AF_INET, SOCK_DGRAM)
         self._is_binded = False
-        self.response_handler = None
         self._mutex = Lock()
 
     def start(self):
+        """
+        Starts a Server in a Thread.
+        """
         print('Starting server on  {}'.format(self.address))
         self._socket.bind(self.address)
         self._is_binded = True
@@ -34,7 +37,62 @@ class TapNet:
         listen_loop = Thread(target=self._listen_loop)
         listen_loop.start()
 
+    def send_json(self, json_to_send, data_type, to):
+        """
+        Send a json as binary data.
+        :param json_to_send: JSON to send
+        :param data_type: ACK, NORMAL or RELIABLE
+        :param to: Receiver's address
+        """
+        json_bytes = json.dumps(json_to_send).encode(encoding='utf-8')
+        self.send_data(json_bytes, data_type, to)
+
+    def send_data(self, bytes_to_send, datagram_type, to):
+        """
+        Send binary data
+        :param bytes_to_send: Binary data to send
+        :param datagram_type: ACK, NORMAL or RELIABLE
+        :param to: Receiver's address
+        """
+        unique_package_id = self._lock_package_id()
+        is_reliable = datagram_type == self.DATAGRAM_RELIABLE
+
+        data_splitted = self._split(bytes_to_send)  # Split binary data
+
+        if is_reliable:
+            # Realizar la estructura de datos
+            self._initialize_structure_for_datagram(len(data_splitted), unique_package_id)
+            # Thread: ACK Listener
+            listen_ack_thread = Thread(target=self._ack_listener, args=[unique_package_id])
+            listen_ack_thread.start()
+
+        #Thread: Enviar datos
+
+        self._send(data_splitted, datagram_type, to, unique_package_id, is_reliable)
+
+        #Activar monitor
+
+        if is_reliable:
+            resend_monitor = Thread(target=self._ack_resend_monitor, args=[unique_package_id, to])
+            resend_monitor.start()
+
+    def _lock_package_id(self):
+        """
+        Locks a unique id, so race condicions are avoided if sended multiples packages.
+        :return: unique package id.
+        """
+        self._mutex.acquire()
+        unique_package_id = self._package_ID
+        self._package_ID += 1
+        self._mutex.release()
+        return unique_package_id
+
     def _split(self, data):
+        """
+        Splits binary data into _CHUNK_SIZEs divisions.
+        :param data: Binary data to divide
+        :return: Array, where each position has _CHUNK_SIZE bytes of data.
+        """
         result = []
         while len(data) > self._CHUNK_SIZE:
             result.append(data[:self._CHUNK_SIZE])
@@ -42,7 +100,19 @@ class TapNet:
         result.append(data)
         return result
 
-    def _initialize_structure_for_reliable(self, data_length, unique_package_id):
+    def _initialize_structure_for_datagram(self, data_length, unique_package_id):
+        """
+        Initialize data for a datagram which is waiting ack:
+            -acks: Array of booleans that indicates if that subpackage receive it's ack(True) or not(False).
+            -remaining_acks: Number of acks left to receive.
+            -backup_data: Array where is saved that subpackage datagram, header included, for easier re-send.
+            -remaining_attempts: Number of attempts of re-sends if an ACK is not received.
+            -last_send_time: Last time that a re-send was done.
+            -completed_or_expired: Boolean that says if that package was completed, or maximum attempts was done.
+
+        :param data_length: Number of subpackages
+        :param unique_package_id: Unique ID for that package
+        """
         if unique_package_id not in self._datagrams_awating_ack.keys():
             self._datagrams_awating_ack[unique_package_id] = {}
             self._datagrams_awating_ack[unique_package_id]['acks'] = [False for _ in range(data_length)]
@@ -52,7 +122,13 @@ class TapNet:
             self._datagrams_awating_ack[unique_package_id]['last_send_time'] = [None for _ in range(data_length)]
             self._datagrams_awating_ack[unique_package_id]['completed_or_expired'] = False
 
-    def _is_completed_or_expired(self, package_id):
+    def _get_is_completed_or_expired(self, package_id):
+        """
+        Get key value of 'completed_or_expired'. If that key does not exists, its assumed that is completed, since data
+        one complete is erased.
+        :param package_id: Unique package id.
+        :return: Boolean value if that package is completed/expired or not.
+        """
         completed_or_expired = self._datagrams_awating_ack[package_id].get('completed_or_expired', True)
         return completed_or_expired
 
@@ -67,11 +143,6 @@ class TapNet:
         self._mutex.release()
 
     def _clean_package_register(self, package_id_listener):
-        # self._datagrams_awating_ack[package_id_listener].pop('acks')
-        # self._datagrams_awating_ack[package_id_listener].pop('remaining_acks')
-        # self._datagrams_awating_ack[package_id_listener].pop('backup_data')
-        # self._datagrams_awating_ack[package_id_listener].pop('remaining_attempts')
-        # self._datagrams_awating_ack[package_id_listener].pop('last_send_time')
         self._datagrams_awating_ack[package_id_listener].clear()
 
     def _ack_listener(self, unique_package_id):
@@ -79,7 +150,7 @@ class TapNet:
             self._socket.bind(('localhost', 10001))
             self._is_binded = True
 
-        while not self._is_completed_or_expired(unique_package_id):
+        while not self._get_is_completed_or_expired(unique_package_id):
 
             datagram, address = self._socket.recvfrom(4096)
 
@@ -92,7 +163,6 @@ class TapNet:
                 self._mark_subpackage(package_id, subpackage_id)
 
         print("Closing listener")
-        # Todo: Export data to txt
         self._clean_package_register(unique_package_id)
 
     def _send(self, data_splitted, datagram_type, destination, unique_package_id, is_reliable):
@@ -104,50 +174,6 @@ class TapNet:
             if is_reliable:
                 self._datagrams_awating_ack[unique_package_id]['backup_data'][i] = chunk
                 self._datagrams_awating_ack[unique_package_id]['last_send_time'][i] = time.time()
-
-    def send_data(self, bytes_to_send, datagram_type, to):
-        """
-        Envía datos a través del socket
-        :param bytes_to_send: Datos a enviar
-        :param datagram_type: Tipo de datos a enviar, ACK, NORMAL o RELIABLE
-        :param to: Receptor al que vamos a enviar los datos
-        """
-        self._mutex.acquire()
-        unique_package_id = self._package_ID #Gurdamos el id por seguridad, ya que igual otros threads mas adelante lo modifican.
-        self._package_ID += 1
-        self._mutex.release()
-
-        is_reliable = datagram_type == self.DATAGRAM_RELIABLE
-
-        #Dividir los datos.
-        data_splitted = self._split(bytes_to_send)
-
-        #Realizar la estructura de datos
-        if is_reliable:
-            self._initialize_structure_for_reliable(len(data_splitted), unique_package_id)
-            # Thread: Preparar el ack listener
-            listen_ack_thread = Thread(target=self._ack_listener, args=[unique_package_id])
-            listen_ack_thread.start()
-
-        #Thread: Enviar datos
-
-        self._send(data_splitted, datagram_type, to, unique_package_id, is_reliable)
-
-        #Activar monitor
-
-        if is_reliable:
-            resend_monitor = Thread(target=self._ack_resend_monitor, args=[unique_package_id, to])
-            resend_monitor.start()
-
-    def send_json(self, json_to_send, data_type, to):
-        """
-        Envía un json a través del socket
-        :param json_to_send: JSON a enviar
-        :param data_type: Tipo de datos a enviar, ACK, NORMAL o RELIABLE
-        :param to: Cliente al que vamos a enviar los datos
-        """
-        json_bytes = json.dumps(json_to_send).encode(encoding='utf-8')
-        self.send_data(json_bytes, data_type, to)
 
     def _get_datagram_type(self, datagram):
         return int.from_bytes(datagram[:4], 'little')
@@ -227,21 +253,19 @@ class TapNet:
 
             datagram_type = self._get_datagram_type(datagram)
 
-            # Todo: crear log.txt con los paquetes recibidos
-
             if datagram_type == self.DATAGRAM_RELIABLE:
                 self._parse_datagram(datagram, address, reliable=True)
             elif datagram_type == self.DATAGRAM_NORMAL:
                 self._parse_datagram(datagram, address, reliable=False)
 
     def _ack_resend_monitor(self, unique_package_id, destination):
-        while not self._is_completed_or_expired(unique_package_id):
+        while not self._get_is_completed_or_expired(unique_package_id):
             time.sleep(0.5)
             self._resend_data(unique_package_id, destination)
 
         print("Closing monitor.")
 
-    def _resend_data(self, package_id, destination):
+    def _get_remaining_ack_list(self, package_id):
         self._mutex.acquire()
         completed_or_expired = self._datagrams_awating_ack[package_id].get('completed_or_expired', True)
 
@@ -250,6 +274,18 @@ class TapNet:
         else:
             remaining_acks_list = [i for i, x in enumerate(self._datagrams_awating_ack[package_id]['acks']) if not x]
         self._mutex.release()
+        return remaining_acks_list
+
+    def _resend_subpackage(self, data, ack_location, package_id, destination):
+        print(f'Resending subpackage {ack_location} of package {package_id}')
+        self._socket.sendto(data[ack_location], destination)
+        self._datagrams_awating_ack[package_id]['remaining_attempts'][ack_location] -= 1
+        self._datagrams_awating_ack[package_id]['last_send_time'][ack_location] = time.time()
+        if self._datagrams_awating_ack[package_id]['remaining_attempts'][ack_location] == 0:
+            self._datagrams_awating_ack[package_id]['acks'][ack_location] = True
+
+    def _resend_data(self, package_id, destination):
+        remaining_acks_list = self._get_remaining_ack_list(package_id)
 
         if remaining_acks_list is not None:
             for ack_location in remaining_acks_list:
@@ -263,13 +299,9 @@ class TapNet:
                         _elapsed_time = _elapsed_time_list[ack_location]
                     else:
                         _elapsed_time = None
+
                     if _data_exists is not None:
                         if _elapsed_time is not None:
                             if time.time() - _elapsed_time > self._AWAIT_TIME:
-                                print(f'Resending subpackage {ack_location} of package {package_id}')
-                                self._socket.sendto(_data_exists[ack_location], destination)
-                                self._datagrams_awating_ack[package_id]['remaining_attempts'][ack_location] -= 1
-                                self._datagrams_awating_ack[package_id]['last_send_time'][ack_location] = time.time()
-                                if self._datagrams_awating_ack[package_id]['remaining_attempts'][ack_location] == 0:
-                                    self._datagrams_awating_ack[package_id]['acks'][ack_location] = True
+                                self._resend_subpackage(_data_exists, ack_location, package_id, destination)
 
