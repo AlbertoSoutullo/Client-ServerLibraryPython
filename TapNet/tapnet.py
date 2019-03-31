@@ -65,11 +65,10 @@ class TapNet:
             listen_ack_thread = Thread(target=self._ack_listener, args=[unique_package_id])
             listen_ack_thread.start()
 
-        #Thread: Enviar datos
-
+        #Thread: Send data
         self._send(data_splitted, datagram_type, to, unique_package_id, is_reliable)
 
-        #Activar monitor
+        #Activate monitor
 
         if is_reliable:
             resend_monitor = Thread(target=self._ack_resend_monitor, args=[unique_package_id, to])
@@ -176,10 +175,18 @@ class TapNet:
                 print(f'ACK received, type: {datagram_type}, Package id:{package_id}, Subpackage Id:{subpackage_id}')
                 self._mark_subpackage(package_id, subpackage_id)
 
-        #print("Closing listener")
         self._clean_package_register(unique_package_id)
 
     def _send(self, data_splitted, datagram_type, destination, unique_package_id, is_reliable):
+        """
+        Send binary data.
+        :param data_splitted: Entire array of data to send.
+        :param datagram_type: ACK, NORMAL or RELIABLE.
+        :param destination: Receiver
+        :param unique_package_id: Unique package ID
+        :param is_reliable: If is reliable, we save chunk of data and time to send again.
+        :return:
+        """
         for i, chunk in enumerate(data_splitted):
             hash = sha256(chunk).digest()
             chunk = datagram_type.to_bytes(4, 'little') + unique_package_id.to_bytes(4, 'little') + hash \
@@ -190,9 +197,19 @@ class TapNet:
                 self._datagrams_awating_ack[unique_package_id]['last_send_time'][i] = time.time()
 
     def _get_datagram_type(self, datagram):
+        """
+        Return datagram type. ACK, NORMAL or RELIABLE.
+        :param datagram: Datagram to check.
+        :return: ACK, NORMAL or RELIABLE.
+        """
         return int.from_bytes(datagram[:4], 'little')
 
     def _hash_is_correct(self, datagram):
+        """
+        Check if hash given is correct.
+        :param datagram: Datagram to check.
+        :return: True or false if it is correct.
+        """
         hash_received = datagram[8:40]
         payload = datagram[48:]
 
@@ -204,6 +221,11 @@ class TapNet:
             return True
 
     def _parse_content(self, datagram):
+        """
+        Parse datagram content, extracting data from header and payload.
+        :param datagram: Datagram to parse.
+        :return: Package ID, Number of Subpackages, Subpackage ID and Payload.
+        """
         package_id = int.from_bytes(datagram[4:8], 'little')
         number_of_subpackages = int.from_bytes(datagram[40:44], 'little')
         subpackage_id = int.from_bytes(datagram[44:48], 'little')
@@ -212,12 +234,23 @@ class TapNet:
         return package_id, number_of_subpackages, subpackage_id, payload
 
     def _create_unique_identifier(self, address, package_id):
+        """
+        Creates a unique identifier for each package, compund by Address, Port and unique ID.
+        :param address: Sender Adress
+        :param package_id: Unique package ID.
+        :return: Tuple of (Address, Port, PackageID)
+        """
         unique_identifier = (address[0], address[1], package_id)
         return unique_identifier
 
     def _create_package_cache(self, unique_identifier, number_of_subpackages):
+        """
+        Creates structure for cache.
+        :param unique_identifier: Unique identifier of the package.
+        :param number_of_subpackages: Number of subpackages.
+        """
         self._cache[unique_identifier] = {}
-        self._cache[unique_identifier]['data'] = [False for _ in range(number_of_subpackages)]
+        self._cache[unique_identifier]['data'] = [None for _ in range(number_of_subpackages)]
         self._cache[unique_identifier]['remaining_subpackages'] = number_of_subpackages
 
     def _check_if_package_already_registered(self, unique_identifier, number_of_subpackages):
@@ -225,6 +258,12 @@ class TapNet:
             self._create_package_cache(unique_identifier, number_of_subpackages)
 
     def _send_ack(self, package_id, subpackage_id, address):
+        """
+        Creates and send ACK.
+        :param package_id: Package Identifier
+        :param subpackage_id: Subpackage ID
+        :param address: Receivers ID.
+        """
         ack = self.DATAGRAM_ACK.to_bytes(4, 'little') + package_id.to_bytes(4, 'little') + \
               subpackage_id.to_bytes(4, 'little')
         print(f"ACK sent to {package_id}, {subpackage_id}")
@@ -259,9 +298,8 @@ class TapNet:
 
     def _listen_loop(self):
         """
-        Escucha las peticiones entrantes
+        Keep listening for entrance petitions.
         """
-
         while 1:
             datagram, address = self._socket.recvfrom(4096)
 
@@ -273,6 +311,11 @@ class TapNet:
                 self._parse_datagram(datagram, address, reliable=False)
 
     def _ack_resend_monitor(self, unique_package_id, destination):
+        """
+        Checks for resend packages every 0.5 seconds.
+        :param unique_package_id: Unique package Identifier
+        :param destination: Destination to resend.
+        """
         while not self._get_is_completed_or_expired(unique_package_id):
             time.sleep(0.5)
             self._resend_data(unique_package_id, destination)
